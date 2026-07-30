@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/vibium/clicker/internal/bidi"
@@ -105,6 +106,18 @@ func newLaunchTestCmd() *cobra.Command {
 	}
 }
 
+// wsSchemeSuggestion returns the url rewritten with the matching WebSocket
+// scheme when given an http(s) url, or "" when no rewrite applies.
+func wsSchemeSuggestion(url string) string {
+	switch {
+	case strings.HasPrefix(url, "https://"):
+		return "wss://" + strings.TrimPrefix(url, "https://")
+	case strings.HasPrefix(url, "http://"):
+		return "ws://" + strings.TrimPrefix(url, "http://")
+	}
+	return ""
+}
+
 func newWSTestCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ws-test [url]",
@@ -112,6 +125,10 @@ func newWSTestCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			url := args[0]
+			if suggestion := wsSchemeSuggestion(url); suggestion != "" {
+				fmt.Fprintf(os.Stderr, "Error: WebSocket URLs must use ws:// or wss://; try %s\n", suggestion)
+				os.Exit(1)
+			}
 			fmt.Printf("Connecting to %s...\n", url)
 
 			conn, err := bidi.Connect(url)
