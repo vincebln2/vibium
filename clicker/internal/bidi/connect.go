@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -20,12 +21,34 @@ func ConnectRemote(url string, headers http.Header) (*Connection, *Client, strin
 	client := NewClient(conn)
 
 	result, err := client.SessionNew(map[string]interface{}{})
-	if err != nil {
-		conn.Close()
-		return nil, nil, "", err
+	if err == nil {
+		return conn, client, result.SessionID, nil
 	}
 
-	return conn, client, result.SessionID, nil
+	// A per-session endpoint (chromedriver's ws://host/session/<id>) already
+	// has a live session and rejects session.new. Attach to it instead,
+	// using session.status to prove the connection is usable.
+	if _, statusErr := client.SessionStatus(); statusErr == nil {
+		return conn, client, sessionIDFromURL(url), nil
+	}
+
+	client.Close()
+	return nil, nil, "", err
+}
+
+// sessionIDFromURL extracts the trailing id from a per-session endpoint URL,
+// or "" when the URL has no /session/<id> path.
+func sessionIDFromURL(url string) string {
+	const marker = "/session/"
+	idx := strings.LastIndex(url, marker)
+	if idx == -1 {
+		return ""
+	}
+	id := url[idx+len(marker):]
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
 }
 
 // SessionNewOnConn performs the session.new handshake with direct reads on a

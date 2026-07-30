@@ -206,14 +206,15 @@ describe('Daemon: Remote browser connect', () => {
     );
   });
 
-  test('vibium stop stops daemon', () => {
+  test('vibium stop closes the session and leaves the daemon running', () => {
     const result = clicker('stop');
-    // stop calls browser_stop via daemon, which closes the session
+    // stop calls browser_stop via daemon, which closes the browser session
     assert.ok(result, 'Should return a result');
 
-    // Verify daemon is not running
+    // The daemon keeps running, same as in local mode; only daemon stop
+    // shuts it down.
     const status = clicker('daemon status');
-    assert.match(status, /not running/i, 'Daemon should not be running');
+    assert.match(status, /running/i, 'Daemon should stay running after stop');
   });
 });
 

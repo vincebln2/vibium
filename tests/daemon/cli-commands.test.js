@@ -248,7 +248,7 @@ describe('Daemon CLI: Screenshot --full-page', () => {
   });
 });
 
-describe('Daemon CLI: quit command', () => {
+describe('Daemon CLI: stop command', () => {
   before(() => {
     stopDaemon();
     clicker('daemon start --headless');
@@ -259,8 +259,8 @@ describe('Daemon CLI: quit command', () => {
     stopDaemon();
   });
 
-  test('quit closes browser session', () => {
-    const result = clickerJSON('quit');
+  test('stop closes browser session', () => {
+    const result = clickerJSON('stop');
     assert.strictEqual(result.ok, true);
     assert.ok(result.result.includes('closed'), 'Should confirm browser closed');
   });
