@@ -19,22 +19,28 @@ func newTypeCmd() *cobra.Command {
 
   vibium type https://the-internet.herokuapp.com/inputs "input" "12345" --timeout 5s
   # Custom timeout (5s, or 5000 for milliseconds)`,
-		Args: cobra.RangeArgs(2, 3),
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
+			pos, flags := splitFlagsFromArgs(cmd, args)
+			if !parseSplitFlags(cmd, flags) {
+				return
+			}
+			requirePositionalArgs(cmd, pos, 2, 3)
 			var selector, text string
-			if len(args) == 3 {
+			if len(pos) == 3 {
 				// type <url> <selector> <text> — navigate first
-				_, err := daemonCall("browser_navigate", map[string]interface{}{"url": args[0]})
+				_, err := daemonCall("browser_navigate", map[string]interface{}{"url": pos[0]})
 				if err != nil {
 					printError(err)
 					return
 				}
-				selector = args[1]
-				text = args[2]
+				selector = pos[1]
+				text = pos[2]
 			} else {
 				// type <selector> <text> — current page
-				selector = args[0]
-				text = args[1]
+				selector = pos[0]
+				text = pos[1]
 			}
 
 			// Type into element
@@ -51,6 +57,5 @@ func newTypeCmd() *cobra.Command {
 		},
 	}
 	addTimeoutFlag(cmd, &timeout)
-	cmd.Flags().SetInterspersed(false)
 	return cmd
 }

@@ -18,10 +18,16 @@ func newFillCmd() *cobra.Command {
 
   vibium fill "#search" "vibium" --timeout 5s
   # Custom timeout (5s, or 5000 for milliseconds)`,
-		Args: cobra.ExactArgs(2),
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			selector := args[0]
-			text := args[1]
+			pos, flags := splitFlagsFromArgs(cmd, args)
+			if !parseSplitFlags(cmd, flags) {
+				return
+			}
+			requirePositionalArgs(cmd, pos, 2, 2)
+			selector := pos[0]
+			text := pos[1]
 			result, err := daemonCall("browser_fill", map[string]interface{}{
 				"selector": selector,
 				"value":    text,
@@ -35,9 +41,5 @@ func newFillCmd() *cobra.Command {
 		},
 	}
 	addTimeoutFlag(cmd, &timeout)
-	// fill now carries a --timeout flag, so it can't disable flag parsing the way
-	// #179 did for the flagless case. SetInterspersed(false) instead keeps negative
-	// positional values (e.g. fill "#x" "-2") from being parsed as shorthand flags.
-	cmd.Flags().SetInterspersed(false)
 	return cmd
 }

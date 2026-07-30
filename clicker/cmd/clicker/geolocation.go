@@ -17,16 +17,22 @@ func newGeolocationCmd() *cobra.Command {
 
   vibium geolocation 51.5074 -0.1278 --accuracy 10
   # Set location to London with 10m accuracy`,
-		Args: cobra.ExactArgs(2),
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			lat, err := strconv.ParseFloat(args[0], 64)
+			pos, flags := splitFlagsFromArgs(cmd, args)
+			if !parseSplitFlags(cmd, flags) {
+				return
+			}
+			requirePositionalArgs(cmd, pos, 2, 2)
+			lat, err := strconv.ParseFloat(pos[0], 64)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid latitude: %s\n", args[0])
+				fmt.Fprintf(os.Stderr, "Error: invalid latitude: %s\n", pos[0])
 				os.Exit(1)
 			}
-			lng, err := strconv.ParseFloat(args[1], 64)
+			lng, err := strconv.ParseFloat(pos[1], 64)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid longitude: %s\n", args[1])
+				fmt.Fprintf(os.Stderr, "Error: invalid longitude: %s\n", pos[1])
 				os.Exit(1)
 			}
 
@@ -48,6 +54,5 @@ func newGeolocationCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Float64("accuracy", 0, "Accuracy in meters (default: 1)")
-	cmd.Flags().SetInterspersed(false)
 	return cmd
 }
