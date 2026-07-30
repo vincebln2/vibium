@@ -107,13 +107,15 @@ func newLaunchTestCmd() *cobra.Command {
 }
 
 // wsSchemeSuggestion returns the url rewritten with the matching WebSocket
-// scheme when given an http(s) url, or "" when no rewrite applies.
+// scheme when given an http(s) url, or "" when no rewrite applies. Scheme
+// matching is case-insensitive per RFC 3986.
 func wsSchemeSuggestion(url string) string {
+	lower := strings.ToLower(url)
 	switch {
-	case strings.HasPrefix(url, "https://"):
-		return "wss://" + strings.TrimPrefix(url, "https://")
-	case strings.HasPrefix(url, "http://"):
-		return "ws://" + strings.TrimPrefix(url, "http://")
+	case strings.HasPrefix(lower, "https://"):
+		return "wss://" + url[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		return "ws://" + url[len("http://"):]
 	}
 	return ""
 }

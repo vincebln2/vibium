@@ -10,6 +10,8 @@ func TestWSSchemeSuggestion(t *testing.T) {
 		{"https://example.com", "wss://example.com"},
 		{"http://example.com", "ws://example.com"},
 		{"http://example.com:9222/session", "ws://example.com:9222/session"},
+		{"HTTPS://example.com/Path", "wss://example.com/Path"},
+		{"Http://example.com", "ws://example.com"},
 		{"wss://example.com", ""},
 		{"ws://example.com", ""},
 		{"example.com", ""},
