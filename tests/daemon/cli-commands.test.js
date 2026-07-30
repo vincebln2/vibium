@@ -92,6 +92,12 @@ describe('Daemon CLI: Element state commands', () => {
     assert.strictEqual(result.ok, true);
     assert.ok(result.result.includes('iana.org'), 'Should return href value');
   });
+
+  test('is actionable works with just a selector on the current page', () => {
+    clicker(`content '<button id="b">Go</button>'`);
+    const result = clicker('is actionable "#b"');
+    assert.match(result, /Visible: true/, 'Should check the current page without a URL');
+  });
 });
 
 describe('Daemon CLI: Accessibility and search commands', () => {
