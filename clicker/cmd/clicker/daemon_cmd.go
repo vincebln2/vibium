@@ -126,7 +126,7 @@ func newDaemonStatusCmd() *cobra.Command {
 						"running": false,
 					})
 				}
-				return
+				os.Exit(1)
 			}
 
 			status, err := daemon.Status()

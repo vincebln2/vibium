@@ -2516,9 +2516,8 @@ func (h *Handlers) browserSleep(args map[string]interface{}) (*ToolsCallResult, 
 		return nil, fmt.Errorf("ms is required and must be positive")
 	}
 
-	// Cap at 30 seconds
 	if ms > 30000 {
-		ms = 30000
+		return nil, fmt.Errorf("ms must be 30000 (30 seconds) or less, got %v", ms)
 	}
 
 	time.Sleep(time.Duration(ms) * time.Millisecond)

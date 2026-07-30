@@ -26,6 +26,17 @@ function clickerJSON(args, opts = {}) {
   return JSON.parse(result);
 }
 
+// daemon status exits 1 when the daemon is stopped, which makes execSync
+// throw; returns the error so tests can assert on exit code and output
+function statusWhileStopped() {
+  try {
+    clicker('daemon status');
+    return null;
+  } catch (e) {
+    return e;
+  }
+}
+
 // Run vibium command but don't throw on non-zero exit (for error responses)
 function clickerJSONSafe(args, opts = {}) {
   try {
@@ -211,9 +222,10 @@ describe('Daemon: Remote browser connect', () => {
     // stop calls browser_stop via daemon, which closes the session
     assert.ok(result, 'Should return a result');
 
-    // Verify daemon is not running
-    const status = clicker('daemon status');
-    assert.match(status, /not running/i, 'Daemon should not be running');
+    // Verify daemon is not running (status exits 1 when stopped)
+    const error = statusWhileStopped();
+    assert.ok(error, 'daemon status should exit non-zero after stop');
+    assert.match(error.stdout, /not running/i, 'Daemon should not be running');
   });
 });
 

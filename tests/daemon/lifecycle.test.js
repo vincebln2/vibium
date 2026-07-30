@@ -23,6 +23,17 @@ function clickerJSON(args, opts = {}) {
   return JSON.parse(result);
 }
 
+// daemon status exits 1 when the daemon is stopped, which makes execSync
+// throw; returns the error so tests can assert on exit code and output
+function statusWhileStopped() {
+  try {
+    clicker('daemon status');
+    return null;
+  } catch (e) {
+    return e;
+  }
+}
+
 // Helper to stop daemon (ignore errors if not running)
 function stopDaemon() {
   try {
@@ -43,9 +54,11 @@ describe('Daemon: Lifecycle', () => {
     stopDaemon();
   });
 
-  test('daemon status reports not running when stopped', () => {
-    const result = clicker('daemon status');
-    assert.match(result, /not running/i, 'Should report not running');
+  test('daemon status reports not running and exits 1 when stopped', () => {
+    const error = statusWhileStopped();
+    assert.ok(error, 'Should exit non-zero when stopped');
+    assert.strictEqual(error.status, 1, 'Should exit 1');
+    assert.match(error.stdout, /not running/i, 'Should report not running');
   });
 
   test('daemon start starts background daemon', () => {
@@ -62,9 +75,10 @@ describe('Daemon: Lifecycle', () => {
     const result = clicker('daemon stop');
     assert.match(result, /stopped/i, 'Should confirm daemon stopped');
 
-    // Verify not running
-    const status = clicker('daemon status');
-    assert.match(status, /not running/i, 'Should report not running');
+    // Verify not running (status exits 1 when stopped)
+    const error = statusWhileStopped();
+    assert.ok(error, 'Should exit non-zero when stopped');
+    assert.match(error.stdout, /not running/i, 'Should report not running');
   });
 });
 
