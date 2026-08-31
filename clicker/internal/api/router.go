@@ -58,12 +58,26 @@ type BrowserSession struct {
 
 	activeContext string // last context foregrounded for pointer input; "" = unknown
 
+	// First-exchange instrumentation (#397): a session whose first command
+	// is never answered looks identical in the logs to one that never
+	// received a command at all. One line when the first command arrives and
+	// one when the first response leaves name the wedged side.
+	connectedAt   time.Time
+	firstCommand  int32 // atomic; 1 = first client command logged
+	firstResponse int32 // atomic; 1 = first response to the client logged
+
 	// prompts records which contexts have an open user prompt, so a command
 	// Chrome will not answer fails immediately instead of timing out.
-	prompts     *PromptTracker
-	routes      *routeRegistry
-	captures    *captureRegistry
-	navigations *NavigationTracker
+	prompts *PromptTracker
+	// dialogManual holds the contexts vibium:dialog.setPolicy has marked
+	// "manual" because a client page has its own dialog handlers. A prompt in
+	// any other context is dismissed by the router as it opens, so no client
+	// implements that default itself (#446). Entries for destroyed contexts
+	// are inert: context ids are never reused.
+	dialogManual map[string]struct{}
+	routes       *routeRegistry
+	captures     *captureRegistry
+	navigations  *NavigationTracker
 
 	// Serializes recording start/stop across their async handlers (the
 	// video screencast negotiation spans several browser commands).
@@ -208,11 +222,13 @@ func (r *Router) OnClientConnect(client ClientTransport) {
 		BidiConn:          bidiConn,
 		Client:            client,
 		ownsRemote:        ownsRemoteSession,
+		connectedAt:       time.Now(),
 		stopChan:          make(chan struct{}),
 		internalCmds:      make(map[int]chan json.RawMessage),
 		abandonedInternal: make(map[int]struct{}),
 		nextInternalID:    1000000, // Start at high number to avoid collision with client IDs
 		prompts:           NewPromptTracker(),
+		dialogManual:      make(map[string]struct{}),
 		routes:            newRouteRegistry(),
 		captures:          newCaptureRegistry(),
 		exposedPreloadIDs: make(map[string]string),
@@ -432,6 +448,14 @@ func (r *Router) OnClientMessage(client ClientTransport, msg string) {
 			fmt.Fprintf(os.Stderr, "[router] Failed to send to browser for client %d: %v\n", client.ID(), err)
 		}
 		return
+	}
+
+	// A #397 incident starts as "the client hung": this line proves the
+	// command reached the router, and its missing counterpart (the first
+	// response line) then points at the browser side.
+	if atomic.CompareAndSwapInt32(&session.firstCommand, 0, 1) {
+		fmt.Fprintf(os.Stderr, "[router] first command from client %d: %s (%.1fs after connect)\n",
+			client.ID(), cmd.Method, time.Since(session.connectedAt).Seconds())
 	}
 
 	// Handle vibium: extension commands (per WebDriver BiDi spec for extensions)
@@ -740,6 +764,11 @@ func (r *Router) OnClientMessage(client ClientTransport, msg string) {
 	case "vibium:page.captureResponse":
 		r.dispatch(session, cmd, r.handlePageCaptureResponse)
 		return
+	case "vibium:page.captureEvent":
+		// Inline, not dispatched: registration must land before the client's
+		// next command, which may be the trigger for the captured event.
+		r.handlePageCaptureEvent(session, cmd)
+		return
 	case "vibium:network.continue":
 		go r.handleNetworkContinue(session, cmd)
 		return
@@ -759,6 +788,14 @@ func (r *Router) OnClientMessage(client ClientTransport, msg string) {
 		return
 	case "vibium:dialog.dismiss":
 		r.dispatch(session, cmd, r.handleDialogDismiss)
+		return
+	case "vibium:dialog.setPolicy":
+		// Inline, not dispatched: ordering relative to the client's next
+		// command is the guarantee this policy exists to provide. A client
+		// registers a handler, flips the policy, then sends the command that
+		// triggers the dialog; handled in message order, the dialog can never
+		// open under the old policy.
+		r.handleDialogSetPolicy(session, cmd)
 		return
 
 	// WebSocket monitoring
@@ -858,8 +895,18 @@ func (r *Router) getContext(session *BrowserSession) (string, error) {
 	return result.Result.Contexts[0].Context, nil
 }
 
+// noteFirstResponse logs the first response this session sends its client,
+// whoever produced it — a vibium: handler or a forwarded browser reply (#397).
+func (s *BrowserSession) noteFirstResponse() {
+	if atomic.CompareAndSwapInt32(&s.firstResponse, 0, 1) {
+		fmt.Fprintf(os.Stderr, "[router] first response to client %d (%.1fs after connect)\n",
+			s.Client.ID(), time.Since(s.connectedAt).Seconds())
+	}
+}
+
 // sendSuccess sends a successful response to the client.
 func (r *Router) sendSuccess(session *BrowserSession, id int, result interface{}) {
+	session.noteFirstResponse()
 	resp := bidiResponse{ID: id, Type: "success", Result: result}
 	data, _ := json.Marshal(resp)
 	session.Client.Send(string(data))
@@ -867,6 +914,7 @@ func (r *Router) sendSuccess(session *BrowserSession, id int, result interface{}
 
 // sendError sends an error response to the client (follows WebDriver BiDi spec).
 func (r *Router) sendError(session *BrowserSession, id int, err error) {
+	session.noteFirstResponse()
 	resp := bidiResponse{
 		ID:      id,
 		Type:    "error",
@@ -955,6 +1003,9 @@ func (r *Router) routeBrowserToClient(session *BrowserSession) {
 			if abandoned {
 				continue
 			}
+
+			// A browser reply about to be forwarded answers a client command.
+			session.noteFirstResponse()
 		}
 
 		// Track page URL from load/navigation events (zero extra BiDi round-trips)
@@ -975,6 +1026,14 @@ func (r *Router) routeBrowserToClient(session *BrowserSession) {
 		// Track user prompts so prompt-sensitive commands can fail fast.
 		session.prompts.Observe([]byte(msg))
 		session.navigations.Observe([]byte(msg))
+
+		// A prompt no client handler has claimed is dismissed here, so every
+		// client shares one default instead of implementing it (#446). A
+		// pending dialog capture claims the prompt the same way a handler
+		// does: the capturer decides how it closes.
+		if ctx := session.autoDismissContext(msg); ctx != "" && !session.captures.wantsPrompt(ctx) {
+			go r.dismissUnhandledPrompt(session, ctx)
+		}
 
 		// Record event for recording (non-blocking)
 		session.mu.Lock()
