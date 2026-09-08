@@ -184,6 +184,8 @@ class VibiumProcess:
         executable_path: Optional[str] = None,
         connect_url: Optional[str] = None,
         connect_headers: Optional[dict] = None,
+        no_browser: bool = False,
+        connect_caps: Optional[str] = None,
     ) -> "VibiumProcess":
         """Start a vibium pipe process.
 
@@ -195,6 +197,7 @@ class VibiumProcess:
             executable_path: Path to vibium binary (default: auto-detect).
             connect_url: Remote BiDi WebSocket URL to connect to instead of launching a local browser.
             connect_headers: HTTP headers for the WebSocket connection (e.g. auth tokens).
+            connect_caps: JSON object of extra alwaysMatch capabilities for classic WebDriver endpoints.
 
         Returns:
             A VibiumProcess instance with stdin/stdout streams ready.
@@ -202,6 +205,8 @@ class VibiumProcess:
         binary = executable_path or find_vibium_bin()
 
         args = [binary, "pipe"]
+        if no_browser:
+            args.append("--no-browser")
         if engine:
             args.extend(["--engine", engine])
         if channel:
@@ -213,6 +218,8 @@ class VibiumProcess:
         if connect_headers:
             for key, value in connect_headers.items():
                 args.extend(["--connect-header", f"{key}: {value}"])
+        if connect_caps:
+            args.extend(["--connect-caps", connect_caps])
 
         # Read lines from stdout until we get the vibium:lifecycle.ready signal.
         # Startup is slow (~16s cold) and slower still when many browsers launch

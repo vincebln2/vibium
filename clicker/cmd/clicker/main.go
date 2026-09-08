@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -28,19 +29,42 @@ func connectFromEnv() (string, http.Header) {
 	return url, headers
 }
 
+// connectCapsFromEnv reads VIBIUM_CONNECT_CAPS, a JSON object of extra
+// alwaysMatch capabilities for classic WebDriver endpoints (cloud grids all
+// take their config this way — vendor-prefixed capability keys).
+// Invalid JSON is fatal: sending a session request without the user's
+// capabilities would silently run against the wrong browser or account.
+func connectCapsFromEnv() map[string]interface{} {
+	return parseConnectCaps(os.Getenv("VIBIUM_CONNECT_CAPS"))
+}
+
+// parseConnectCaps parses a JSON capabilities object, exiting with a clear
+// message when the JSON is invalid. Empty input means no extra capabilities.
+func parseConnectCaps(capsJSON string) map[string]interface{} {
+	if capsJSON == "" {
+		return nil
+	}
+	var caps map[string]interface{}
+	if err := json.Unmarshal([]byte(capsJSON), &caps); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: connect capabilities are not a valid JSON object: %v\n", err)
+		os.Exit(1)
+	}
+	return caps
+}
+
 var version = "dev"
 
 // Global flags
 var (
-	headless       bool
-	verbose        bool
-	jsonOutput     bool
-	session        string
-	engineName     string
+	headless      bool
+	verbose       bool
+	jsonOutput    bool
+	session       string
+	engineName    string
 	engineChannel string
-	headlessSet    bool
-	engineSet      bool
-	channelSet     bool
+	headlessSet   bool
+	engineSet     bool
+	channelSet    bool
 )
 
 // defaultEngine returns the browser engine to launch when --engine is not given.
@@ -55,9 +79,22 @@ func main() {
 	progName := filepath.Base(os.Args[0])
 
 	rootCmd := &cobra.Command{
-		Use:   progName,
+		Use: progName + " [command | \"<prompt>\"]",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 && !strings.ContainsAny(args[0], " \t\r\n") {
+				return fmt.Errorf("unknown command %q; for a one-word goal use %s run %q", args[0], cmd.Name(), args[0])
+			}
+			return cobra.NoArgs(cmd, args)
+		},
+		Example: `  vibium "open example.com and find its contact page"
+  # Equivalent to vibium run "open example.com and find its contact page".
+  vibium run "stop"
+  # One-word prompts need the explicit run command.`,
 		Short: "Browser automation for AI agents and humans",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if isReadyCommand(cmd) {
+				return nil
+			}
 			headlessSet = cmd.Flags().Changed("headless")
 			engineSet = cmd.Flags().Changed("engine") || os.Getenv("VIBIUM_ENGINE") != ""
 			channelSet = cmd.Flags().Changed("channel") || os.Getenv("VIBIUM_ENGINE_CHANNEL") != ""
@@ -70,6 +107,12 @@ func main() {
 			if session != "" {
 				if err := os.Setenv("VIBIUM_SESSION", session); err != nil {
 					return err
+				}
+			}
+			if cmd.Name() == "pipe" {
+				noBrowser, _ := cmd.Flags().GetBool("no-browser")
+				if noBrowser {
+					return paths.ValidateSessionName(paths.SessionName())
 				}
 			}
 			if engineName != "chrome" && engineName != "firefox" {
@@ -132,6 +175,10 @@ func main() {
 	rootCmd.AddCommand(newWSTestCmd())
 	rootCmd.AddCommand(newBiDiTestCmd())
 	rootCmd.AddCommand(newNavigateCmd())
+	rootCmd.AddCommand(newCheckCmd())
+	runCmd := newRunCmd()
+	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(newReadyCmd())
 	rootCmd.AddCommand(newScreenshotCmd())
 	rootCmd.AddCommand(newEvalCmd())
 	rootCmd.AddCommand(newFindCmd())
@@ -158,13 +205,14 @@ func main() {
 	rootCmd.AddCommand(newStopCmd())
 	rootCmd.AddCommand(newFillCmd())
 	rootCmd.AddCommand(newPressCmd())
-	rootCmd.AddCommand(newCheckCmd())
-	rootCmd.AddCommand(newUncheckCmd())
+	rootCmd.AddCommand(newSetCmd())
+	rootCmd.AddCommand(newUnsetCmd())
 	rootCmd.AddCommand(newValueCmd())
 	rootCmd.AddCommand(newAttrCmd())
 	rootCmd.AddCommand(newA11yTreeCmd())
 	rootCmd.AddCommand(newSleepCmd())
 	rootCmd.AddCommand(newSkillCmd())
+	rootCmd.AddCommand(newConfigCmd())
 	rootCmd.AddCommand(newMapCmd())
 	rootCmd.AddCommand(newDiffCmd())
 	rootCmd.AddCommand(newPDFCmd())
@@ -196,6 +244,8 @@ func main() {
 
 	rootCmd.Version = version
 	rootCmd.SetVersionTemplate(progName + " v{{.Version}}\n")
+
+	rootCmd.SetArgs(promptArgs(rootCmd, runCmd, os.Args[1:]))
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -19,12 +19,16 @@ const INSTALLING_MARKER = '[pipe] installing browser';
 const STDERR_TAIL_LIMIT = 8192;
 
 export interface VibiumProcessOptions {
+  /** @internal Serve archive operations without a browser. */
+  noBrowser?: boolean;
   engine?: 'chrome' | 'firefox';
   channel?: string;
   headless?: boolean;
   executablePath?: string;
   connectURL?: string;
   connectHeaders?: Record<string, string>;
+  /** JSON object of extra alwaysMatch capabilities for classic WebDriver endpoints. */
+  connectCaps?: string;
 }
 
 export class VibiumProcess {
@@ -50,6 +54,7 @@ export class VibiumProcess {
     const binaryPath = options.executablePath || getVibiumBinPath();
 
     const args = ['pipe'];
+    if (options.noBrowser) args.push('--no-browser');
     if (options.engine) {
       args.push('--engine', options.engine);
     }
@@ -66,6 +71,9 @@ export class VibiumProcess {
       for (const [key, value] of Object.entries(options.connectHeaders)) {
         args.push('--connect-header', `${key}: ${value}`);
       }
+    }
+    if (options.connectCaps) {
+      args.push('--connect-caps', options.connectCaps);
     }
 
     // Startup is slow (~16s cold) and gets slower when many browsers launch at
@@ -228,6 +236,8 @@ export class VibiumProcess {
       process.removeListener('SIGTERM', this._cleanupListeners);
       this._cleanupListeners = null;
     }
+
+    if (this._process.exitCode !== null || this._process.signalCode !== null) return;
 
     return new Promise((resolve) => {
       let resolved = false;

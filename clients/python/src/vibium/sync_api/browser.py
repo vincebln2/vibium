@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from ..check import CheckResult, send_check
+from ..run import RunResult
+
 from typing import Callable, List, Optional, TYPE_CHECKING
 
 from .page import Page
@@ -22,6 +25,18 @@ class Browser:
 
     def __repr__(self) -> str:
         return "Browser(connected=True)"
+
+    def __call__(self, goal: str, *, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> RunResult:
+        return self.run(goal, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort)
+
+    def run(self, goal: str, *, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> RunResult:
+        """Accomplish a live goal; the existing runtime owns the model loop."""
+        return self._loop.run(self._async.run(goal, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort), timeout=210)
+
+    def check(self, claim: str, *, record: Optional[str] = None, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> CheckResult:
+        """Independently verify live behavior, or inspect a read-only archive."""
+        return self._loop.run(self._async.check(claim, record=record, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort), timeout=210)
+
 
     def page(self) -> Page:
         """Get the default page (first browsing context)."""
@@ -70,6 +85,18 @@ class Browser:
 class _BrowserLauncher:
     """Module-level sync browser launcher object."""
 
+    def check(self, claim: str, *, record: str, executable_path: Optional[str] = None, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> CheckResult:
+        """Inspect an archive without installing or starting a browser."""
+        from .._sync_base import _EventLoopThread
+        from ..async_api.browser import browser as async_launcher
+        loop = _EventLoopThread()
+        loop.start()
+        try:
+            return loop.run(async_launcher.check(claim, record=record, executable_path=executable_path, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort), timeout=210)
+        finally:
+            loop.stop()
+
+
     def start(
         self,
         url: Optional[str] = None,
@@ -78,12 +105,14 @@ class _BrowserLauncher:
         channel: Optional[str] = None,
         headless: bool = False,
         headers: Optional[dict] = None,
+        caps: Optional[dict] = None,
         executable_path: Optional[str] = None,
     ) -> Browser:
         """Start a browser session.
 
         Args:
-            url: Remote BiDi WebSocket URL. If not provided, checks
+            url: Remote BiDi WebSocket URL, or an http(s) classic WebDriver
+                endpoint (Selenium Grid, cloud grid). If not provided, checks
                 VIBIUM_CONNECT_URL env var, then falls back to local launch.
             engine: Browser engine to launch: "chrome" (default) or "firefox"
                 (local launch only).
@@ -91,6 +120,8 @@ class _BrowserLauncher:
                 "beta". Currently honored by Firefox only (local launch only).
             headless: Run browser in headless mode (local launch only).
             headers: HTTP headers for remote connection (e.g. auth tokens).
+            caps: Extra alwaysMatch capabilities for classic WebDriver
+                endpoints (vendor-prefixed keys like vendor:options).
             executable_path: Path to vibium binary (default: auto-detect).
         """
         from .._sync_base import _EventLoopThread
@@ -106,6 +137,7 @@ class _BrowserLauncher:
                 channel=channel,
                 headless=headless,
                 headers=headers,
+                caps=caps,
                 executable_path=executable_path,
             )
         )

@@ -1,3 +1,6 @@
+import { callable } from './callable';
+import { RunOptions, RunResult, sendRun } from './run';
+import { CheckOptions, RecordedCheckOptions, CheckResult, sendCheck } from './check';
 import { VibiumProcess } from './clicker';
 import { BiDiClient, BiDiEvent } from './bidi';
 import { Page } from './page';
@@ -16,8 +19,13 @@ export interface StartOptions {
   channel?: string;
   headless?: boolean;
   headers?: Record<string, string>;
+  /** Extra alwaysMatch capabilities for classic WebDriver endpoints
+   *  (cloud grids take their config this way, via vendor-prefixed capability keys). */
+  caps?: Record<string, unknown>;
   executablePath?: string;
 }
+
+export interface Browser { (goal: string, options?: RunOptions): Promise<RunResult>; }
 
 export class Browser {
   private client: BiDiClient;
@@ -51,10 +59,21 @@ export class Browser {
         }
       }
     });
+    return callable(this);
   }
 
   [customInspect](): string {
     return 'Browser { connected: true }';
+  }
+
+  /** Accomplish a live browser goal; provider settings are read in the runtime. */
+  run(goal: string, options: RunOptions = {}): Promise<RunResult> {
+    return sendRun(this.client, goal, options);
+  }
+
+  /** Independently verify this session, or inspect a saved archive. */
+  check(claim: string, options: CheckOptions = {}): Promise<CheckResult> {
+    return sendCheck(this.client, claim, options);
   }
 
   /** Get the default page (first browsing context). */
@@ -124,6 +143,18 @@ function envHeaders(): Record<string, string> {
 }
 
 export const browser = {
+  /** Inspect a saved archive without installing or starting a browser. */
+  async check(claim: string, options: RecordedCheckOptions): Promise<CheckResult> {
+    if (!options?.record) throw new Error('Standalone verification requires record');
+    const proc = await VibiumProcess.start({ noBrowser: true, executablePath: options.executablePath });
+    let client: BiDiClient | undefined;
+    try {
+      client = BiDiClient.fromStreams(proc.stdin, proc.stdout, proc.preReadyLines);
+      return await sendCheck(client, claim, options);
+    } finally {
+      try { await client?.close(); } finally { await proc.stop(); }
+    }
+  },
   async start(urlOrOptions?: string | StartOptions, options: StartOptions = {}): Promise<Browser> {
     let url: string | undefined;
     if (typeof urlOrOptions === 'object') {
@@ -135,11 +166,15 @@ export const browser = {
     const connectURL = url || process.env.VIBIUM_CONNECT_URL;
     if (connectURL) {
       const headers = { ...envHeaders(), ...options.headers };
+      // Raw JSON string either way — the binary validates it and owns the
+      // error message, so no parsing here.
+      const caps = options.caps ? JSON.stringify(options.caps) : process.env.VIBIUM_CONNECT_CAPS;
       debug('connecting to remote browser', { url: connectURL });
 
       const proc = await VibiumProcess.start({
         connectURL,
         connectHeaders: Object.keys(headers).length ? headers : undefined,
+        connectCaps: caps || undefined,
         executablePath: options.executablePath,
       });
       debug('vibium started (connect mode)');

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from ..check import CheckResult, send_check
+from ..run import RunResult, send_run
+
+import json
 import os
 from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
 
@@ -42,6 +46,18 @@ class Browser:
             page = Page(self._client, params["context"], params.get("userContext", "default"))
             for cb in callbacks:
                 cb(page)
+
+    async def __call__(self, goal: str, *, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> RunResult:
+        return await self.run(goal, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort)
+
+    async def run(self, goal: str, *, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> RunResult:
+        """Accomplish a goal in the live browser using the configured runtime."""
+        return await send_run(self._client, goal, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort)
+
+    async def check(self, claim: str, *, record: Optional[str] = None, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> CheckResult:
+        """Independently verify live behavior, or inspect a read-only archive."""
+        return await send_check(self._client, claim, record, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort)
+
 
     async def page(self) -> Page:
         """Get the default page (first browsing context)."""
@@ -92,6 +108,25 @@ class Browser:
 class _BrowserLauncher:
     """Module-level browser launcher object."""
 
+    async def check(self, claim: str, *, record: str, executable_path: Optional[str] = None, provider: Optional[str] = None, model: Optional[str] = None, base_url: Optional[str] = None, reasoning_effort: Optional[str] = None) -> CheckResult:
+        """Inspect an archive without installing or starting a browser."""
+        from ..binary import VibiumProcess
+        from ..client import BiDiClient
+        if not record:
+            raise ValueError("Standalone verification requires record")
+        process = await VibiumProcess.start(no_browser=True, executable_path=executable_path)
+        client = None
+        try:
+            client = await BiDiClient.connect(process)
+            return await send_check(client, claim, record, provider=provider, model=model, base_url=base_url, reasoning_effort=reasoning_effort)
+        finally:
+            try:
+                if client:
+                    await client.close()
+            finally:
+                await process.stop()
+
+
     async def start(
         self,
         url: Optional[str] = None,
@@ -100,12 +135,14 @@ class _BrowserLauncher:
         channel: Optional[str] = None,
         headless: bool = False,
         headers: Optional[Dict[str, str]] = None,
+        caps: Optional[Dict[str, Any]] = None,
         executable_path: Optional[str] = None,
     ) -> Browser:
         """Start a browser session.
 
         Args:
-            url: Remote BiDi WebSocket URL. If not provided, checks
+            url: Remote BiDi WebSocket URL, or an http(s) classic WebDriver
+                endpoint (Selenium Grid, cloud grid). If not provided, checks
                 VIBIUM_CONNECT_URL env var, then falls back to local launch.
             engine: Browser engine to launch: "chrome" (default) or "firefox"
                 (local launch only).
@@ -113,6 +150,8 @@ class _BrowserLauncher:
                 "beta". Currently honored by Firefox only (local launch only).
             headless: Run browser in headless mode (local launch only).
             headers: HTTP headers for remote connection (e.g. auth tokens).
+            caps: Extra alwaysMatch capabilities for classic WebDriver
+                endpoints (vendor-prefixed keys like vendor:options).
             executable_path: Path to vibium binary (default: auto-detect).
         """
         from ..binary import VibiumProcess
@@ -125,9 +164,13 @@ class _BrowserLauncher:
             if api_key:
                 env_headers["Authorization"] = f"Bearer {api_key}"
             merged = {**env_headers, **(headers or {})}
+            # Raw JSON string either way — the binary validates it and owns
+            # the error message, so no parsing here.
+            caps_json = json.dumps(caps) if caps else os.environ.get("VIBIUM_CONNECT_CAPS")
             process = await VibiumProcess.start(
                 connect_url=connect_url,
                 connect_headers=merged or None,
+                connect_caps=caps_json or None,
                 executable_path=executable_path,
             )
         else:
