@@ -7,7 +7,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { VIBIUM } = require('../helpers');
+const { VIBIUM, pinnedChromeVersion } = require('../helpers');
 const exec = promisify(execFile);
 
 function environment(t, extra = {}) {
@@ -18,7 +18,10 @@ function environment(t, extra = {}) {
     VIBIUM_SESSION: 'ready-ai', VIBIUM_ENGINE: 'chrome', VIBIUM_ENGINE_PATH: '',
     VIBIUM_ENGINE_CHANNEL: '', VIBIUM_ENGINE_VERSION: '', VIBIUM_CONNECT_URL: '',
     VIBIUM_AI_PROVIDER: '', VIBIUM_AI_MODEL: '', OPENAI_API_KEY: '',
-    VIBIUM_AI_BASE_URL: '', VIBIUM_AI_REASONING_EFFORT: '', ...extra,
+    VIBIUM_AI_BASE_URL: '', VIBIUM_AI_REASONING_EFFORT: '',
+    // These cases own HOME and write their own ai.env, so they want the real
+    // loading behavior rather than the suite-wide opt-out in the Makefile.
+    VIBIUM_LOAD_AI_ENV: '', ...extra,
   };
 }
 async function run(env, args = ['ready', 'ai', '--json']) {
@@ -49,7 +52,7 @@ function answer(res, content, toolCalls) {
     message: { role: 'assistant', content, tool_calls: toolCalls } }] }));
 }
 
-test('ready ai lists missing settings and detects an unsourced env file without reading it', async t => {
+test('ready ai loads empty AI variables from ai.env and still hides the key', async t => {
   const env = environment(t);
   const settings = path.join(env.HOME, '.config', 'vibium', 'ai.env');
   fs.mkdirSync(path.dirname(settings), { recursive: true });
@@ -58,29 +61,41 @@ test('ready ai lists missing settings and detects an unsourced env file without 
   for (const args of [['ready', 'ai'], ['ready', 'ai', '--json']]) {
     const result = await run(env, args);
     assert.equal(result.code, 1);
-    assert.match(result.stdout, /VIBIUM_AI_PROVIDER/);
     assert.match(result.stdout, /VIBIUM_AI_MODEL/);
-    assert.match(result.stdout, /source ~\/\.config\/vibium\/ai\.env/);
-    // Both notes contain that source line, so assert on the branch itself:
-    // the file is present, so readiness must say it found one.
-    assert.match(result.stdout, /Found ~\/\.config\/vibium\/ai\.env/);
+    assert.match(result.stdout, /Loaded ~\/\.config\/vibium\/ai\.env/);
     assert.doesNotMatch(result.stdout, /No AI settings file yet/);
+    assert.doesNotMatch(result.stdout, /does not load it automatically/);
     assert.doesNotMatch(result.stdout + result.stderr, /secret-file-marker/);
     if (args.includes('--json')) {
       const body = JSON.parse(result.stdout);
       assert.equal(body.ok, false);
       assert.equal(body.result.ready, false);
+      const provider = body.result.checks.find(c => c.name === 'VIBIUM_AI_PROVIDER');
+      const model = body.result.checks.find(c => c.name === 'VIBIUM_AI_MODEL');
+      const key = body.result.checks.find(c => c.name === 'OPENAI_API_KEY');
+      assert.equal(provider.status, 'passed');
+      assert.equal(model.status, 'failed');
+      assert.equal(key.status, 'passed');
       assert.equal(body.result.checks.find(c => c.name === 'provider').status, 'skipped');
-      assert.equal(body.result.checks.find(c => c.name === 'credentials').status, 'skipped');
-      assert.equal(body.result.checks.find(c => c.name === 'VIBIUM_AI_BASE_URL').status, 'skipped');
-      assert.equal(body.result.checks.find(c => c.name === 'VIBIUM_AI_REASONING_EFFORT').status, 'skipped');
-      assert.match(body.result.summary, /rerun vibium ready ai\./);
     }
-    assert.doesNotMatch(result.stdout, /\[PASSED\]|OPENAI_API_KEY/);
-    assert.match(result.stdout, /rerun vibium ready ai\./);
     noBrowser(env);
   }
   assert.deepEqual(fs.readFileSync(settings), before);
+});
+
+test('ready ai names the skipped ai.env instead of claiming it loaded', { skip: process.platform === 'win32' }, async t => {
+  const env = environment(t);
+  const settings = path.join(env.HOME, '.config', 'vibium', 'ai.env');
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, 'OPENAI_API_KEY=secret-file-marker\nVIBIUM_AI_PROVIDER=openai\n', { mode: 0o644 });
+  const result = await run(env, ['ready', 'ai']);
+  assert.equal(result.code, 1);
+  assert.match(result.stdout, /Found ~\/\.config\/vibium\/ai\.env but did not load it/);
+  assert.match(result.stdout, /0644/);
+  assert.match(result.stdout, /chmod 600/);
+  assert.doesNotMatch(result.stdout, /Loaded ~\/\.config\/vibium\/ai\.env/);
+  assert.doesNotMatch(result.stdout + result.stderr, /secret-file-marker/);
+  noBrowser(env);
 });
 
 test('ready ai exercises the actual provider transport and reports readiness in text and JSON', async t => {
@@ -184,7 +199,7 @@ test('ready ai provider selection overrides defaults and ignores broken browser 
   const env = environment(t, { VIBIUM_AI_PROVIDER: 'anthropic', VIBIUM_AI_MODEL: 'old-model',
     VIBIUM_AI_BASE_URL: 'http://127.0.0.1:1', VIBIUM_AI_REASONING_EFFORT: 'invalid',
     VIBIUM_ENGINE: 'invalid-browser', VIBIUM_ENGINE_CHANNEL: 'invalid-channel', VIBIUM_ENGINE_PATH: '/does-not-exist' });
-  const args = ['ready', 'ai', 'local', '--model', 'selected-model', '--base-url', fixture.url, '--json'];
+  const args = ['ready', 'ai', 'local', '--model', 'selected-model', '--ai-base-url', fixture.url, '--json'];
   assert.equal((await run(env, args)).code, 0);
   assert.equal(fixture.requests(), 2);
   assert.equal((await run(env, ['ready', 'ai', 'local', '--json'])).code, 1, 'provider change must require model');
@@ -218,7 +233,7 @@ test('plain ready reports browser and AI failures together', async t => {
 // These executables are intentionally harmless traps. A launch regression fails
 // the check (and writes a marker on Unix) without ever starting a real browser.
 function installedBrowsers(env) {
-  const version = path.join(env.VIBIUM_CACHE_DIR, 'chrome-for-testing', '150.0.0.1');
+  const version = path.join(env.VIBIUM_CACHE_DIR, 'chrome-for-testing', pinnedChromeVersion());
   const chrome = path.join(version, process.platform === 'darwin'
     ? 'Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing'
     : process.platform === 'win32' ? 'chrome.exe' : 'chrome');

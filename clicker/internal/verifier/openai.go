@@ -37,12 +37,26 @@ func (v *OpenAI) Check(ctx context.Context, req Request, executor ToolExecutor) 
 		return Result{}, err
 	}
 	instruction := systemInstruction
-	initial := []string{"browser_get_url", "browser_map", "browser_a11y_tree"}
+	// browser_get_text supplies the visible text the accessibility tree
+	// prunes, so the first model turn can act instead of screenshotting to
+	// see what the page says (#593).
+	initial := []string{"browser_get_url", "browser_map", "browser_a11y_tree", "browser_get_text"}
 	if req.Record != "" {
 		instruction = traceInstruction
 		initial = []string{"trace_summary"}
 	}
 	op := Operation{Instruction: instruction, Input: req.Claim, InitialTools: initial}
+	if req.BaseSite != "" {
+		base, err := ParseSiteURL(req.BaseSite)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := OpenSite(ctx, executor, base); err != nil {
+			return Result{}, err
+		}
+		executor = WithSite(executor, base)
+		op.Input += "\n\nSite under test: " + base.String() + " (trusted; relative navigation paths resolve against it)"
+	}
 	op.ValidateResult = func(content string) error {
 		_, err := parseResult(message{Content: content}, req.Claim)
 		return err
@@ -59,7 +73,7 @@ func (v *OpenAI) Check(ctx context.Context, req Request, executor ToolExecutor) 
 }
 
 // complete requests one model turn. A non-empty force names a tool the model
-// must call; it is applied on the native providers only, so the compatibility
+// must call; it is applied on native openai and xai only, so the compatibility
 // floor for openai-compatible and local servers stays at plain function tools.
 func (v *Model) complete(ctx context.Context, config Config, messages []message, functions []interface{}, force string) (message, error) {
 	switch config.Provider {
@@ -75,7 +89,7 @@ func (v *Model) complete(ctx context.Context, config Config, messages []message,
 func (v *Model) completeOpenAI(ctx context.Context, config Config, messages []message, functions []interface{}, force string) (message, error) {
 	base := config.Endpoint()
 	payload := map[string]interface{}{"model": config.Model, "messages": messages, "tools": functions, "parallel_tool_calls": false, "max_completion_tokens": MaxOutputTokens}
-	if force != "" && config.Provider == "openai" {
+	if force != "" && (config.Provider == "openai" || config.Provider == "xai") {
 		payload["tool_choice"] = map[string]interface{}{"type": "function", "function": map[string]string{"name": force}}
 	}
 	if config.ReasoningEffort != "" {
@@ -85,7 +99,7 @@ func (v *Model) completeOpenAI(ctx context.Context, config Config, messages []me
 	if config.APIKey != "" {
 		headers["Authorization"] = "Bearer " + config.APIKey
 	}
-	data, err := v.post(ctx, base+"/chat/completions", payload, headers)
+	data, contentType, err := v.post(ctx, base+"/chat/completions", payload, headers)
 	if err != nil {
 		return message{}, err
 	}
@@ -96,7 +110,7 @@ func (v *Model) completeOpenAI(ctx context.Context, config Config, messages []me
 		} `json:"choices"`
 	}
 	if json.Unmarshal(data, &completion) != nil || len(completion.Choices) != 1 {
-		return message{}, fmt.Errorf("invalid verifier provider response")
+		return message{}, invalidProviderResponse(config, contentType, "a chat-completions message")
 	}
 	choice := completion.Choices[0]
 	if choice.FinishReason != "stop" && choice.FinishReason != "tool_calls" {

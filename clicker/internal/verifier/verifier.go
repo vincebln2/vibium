@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -19,12 +20,66 @@ const MaxImage = 2 * 1024 * 1024
 const MaxClaim = 4000
 
 type Config struct {
-	Role            string `json:"role,omitempty"` // empty means verifier; both roles share AI defaults
-	Provider        string `json:"provider"`
-	Model           string `json:"model"`
-	BaseURL         string `json:"baseURL"`
-	APIKey          string `json:"apiKey,omitempty"`
-	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	Role     string `json:"role,omitempty"` // empty means verifier; both roles share AI defaults
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	BaseURL  string `json:"baseURL"`
+	APIKey   string `json:"apiKey,omitempty"`
+	// CredentialSource says where APIKey came from (api_key, grok_session,
+	// grok_expired). Never serialized; recordings must not learn it.
+	CredentialSource string `json:"-"`
+	ReasoningEffort  string `json:"reasoningEffort,omitempty"`
+}
+
+// Provider describes a supported AI provider. ModelsURL is empty for servers
+// that choose their own model names.
+type Provider struct {
+	Name            string
+	ModelsURL       string
+	ReasoningEffort bool
+}
+
+// Providers is the one list of supported AI providers, in display order.
+var Providers = []Provider{
+	{Name: "openai", ModelsURL: "https://developers.openai.com/api/docs/models", ReasoningEffort: true},
+	{Name: "xai", ModelsURL: "https://docs.x.ai/developers/models", ReasoningEffort: true},
+	{Name: "anthropic", ModelsURL: "https://platform.claude.com/docs/en/models/overview"},
+	{Name: "google", ModelsURL: "https://ai.google.dev/gemini-api/docs/models"},
+	{Name: "openai-compatible", ReasoningEffort: true},
+	{Name: "local", ReasoningEffort: true},
+}
+
+// ReasoningEfforts lists the accepted reasoning efforts; empty means the model default.
+var ReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+func ProviderNames() []string {
+	names := make([]string, len(Providers))
+	for i, p := range Providers {
+		names[i] = p.Name
+	}
+	return names
+}
+
+func lookupProvider(name string) (Provider, bool) {
+	for _, p := range Providers {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return Provider{}, false
+}
+
+// OrList joins items as "a, b, or c".
+func OrList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " or " + items[1]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + ", or " + items[len(items)-1]
 }
 
 func ConfigFromEnv() (Config, error) { return ConfigForRole("check") }
@@ -39,6 +94,8 @@ func (c Config) CredentialVariable() string {
 		return "ANTHROPIC_API_KEY"
 	case "google":
 		return "GOOGLE_API_KEY"
+	case "xai":
+		return "XAI_API_KEY"
 	default:
 		return "OPENAI_API_KEY"
 	}
@@ -54,6 +111,8 @@ func (c Config) Endpoint() string {
 		return "https://generativelanguage.googleapis.com/v1beta"
 	case "local":
 		return "http://127.0.0.1:8080/v1"
+	case "xai":
+		return "https://api.x.ai/v1"
 	default:
 		return "https://api.openai.com/v1"
 	}
@@ -76,19 +135,16 @@ func (c Config) Checks() []ConfigCheck {
 		}
 		checks = append(checks, ConfigCheck{Variable: variable, Error: problem})
 	}
-	validEffort := false
-	switch c.ReasoningEffort {
-	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
-		validEffort = true
-	}
-	if (c.Provider == "anthropic" || c.Provider == "google") && c.ReasoningEffort != "" {
+	provider, knownProvider := lookupProvider(c.Provider)
+	validEffort := c.ReasoningEffort == "" || slices.Contains(ReasoningEfforts, c.ReasoningEffort)
+	if knownProvider && !provider.ReasoningEffort && c.ReasoningEffort != "" {
 		validEffort = false
 	}
 	check(prefix+"REASONING_EFFORT", validEffort, "invalid "+prefix+"REASONING_EFFORT")
-	check(prefix+"PROVIDER", c.Provider == "openai" || c.Provider == "openai-compatible" || c.Provider == "local" || c.Provider == "anthropic" || c.Provider == "google", "set "+prefix+"PROVIDER to openai, anthropic, google, openai-compatible, or local")
+	check(prefix+"PROVIDER", knownProvider, "set "+prefix+"PROVIDER to "+OrList(ProviderNames()))
 	check(prefix+"MODEL", strings.TrimSpace(c.Model) != "", prefix+"MODEL is required")
-	requiresKey := c.Provider == "openai" || c.Provider == "anthropic" || c.Provider == "google"
-	check(c.CredentialVariable(), !requiresKey || strings.TrimSpace(c.APIKey) != "", c.CredentialVariable()+" is required")
+	credName, credProblem := c.credentialCheck()
+	check(credName, credProblem == "", credProblem)
 	endpointProblem := ""
 	if c.Provider == "openai-compatible" && c.BaseURL == "" {
 		endpointProblem = prefix + "BASE_URL is required for openai-compatible"
@@ -101,6 +157,42 @@ func (c Config) Checks() []ConfigCheck {
 	}
 	check(prefix+"BASE_URL", endpointProblem == "", endpointProblem)
 	return checks
+}
+
+// credentialGeminiKey marks a google key read from GEMINI_API_KEY, the name
+// Google's own SDKs use, so ready output names the variable in effect.
+const credentialGeminiKey = "gemini_api_key"
+
+// credentialCheck names the credential in use. A borrowed Grok session is
+// reported as "Grok login" so ready output matches what the user set up.
+func (c Config) credentialCheck() (name, problem string) {
+	name = c.CredentialVariable()
+	if c.Provider == "xai" {
+		switch c.CredentialSource {
+		case CredentialGrokSession:
+			return "Grok login", ""
+		case credentialGrokExpired:
+			return "Grok login", "the Grok CLI login has expired; run grok login again, or export XAI_API_KEY"
+		}
+		if strings.TrimSpace(c.APIKey) == "" {
+			return name, "XAI_API_KEY is required; a Grok CLI login (grok login) also works"
+		}
+		return name, ""
+	}
+	if c.Provider == "google" {
+		if c.CredentialSource == credentialGeminiKey {
+			return "GEMINI_API_KEY", ""
+		}
+		if strings.TrimSpace(c.APIKey) == "" {
+			return name, "GOOGLE_API_KEY is required; GEMINI_API_KEY also works"
+		}
+		return name, ""
+	}
+	requiresKey := c.Provider == "openai" || c.Provider == "anthropic"
+	if requiresKey && strings.TrimSpace(c.APIKey) == "" {
+		return name, name + " is required"
+	}
+	return name, ""
 }
 
 func (c Config) Validate() error {
@@ -116,6 +208,9 @@ type Request struct {
 	Claim  string `json:"claim"`
 	Record string `json:"record,omitempty"` // explicit archive on the runtime host
 	Output string `json:"output,omitempty"` // optional new live recording on the runtime host
+	// BaseSite is the site under test (#575), distinct from the AI provider
+	// endpoint in Config.BaseURL.
+	BaseSite string `json:"baseURL,omitempty"`
 	// Configuration is transmitted only over the existing private daemon socket.
 	// Never pass it to the recorder, tool executor, or provider messages.
 	Config Config `json:"config"`
@@ -124,6 +219,14 @@ type Request struct {
 func (r Request) Validate() error {
 	if r.Record != "" && r.Output != "" {
 		return fmt.Errorf("input archive and live recording output cannot be combined")
+	}
+	if r.BaseSite != "" {
+		if r.Record != "" {
+			return fmt.Errorf("a saved-recording check has no live site to open; record and a site under test cannot be combined")
+		}
+		if _, err := ParseSiteURL(r.BaseSite); err != nil {
+			return err
+		}
 	}
 	if strings.TrimSpace(r.Claim) == "" || len(r.Claim) > MaxClaim {
 		return fmt.Errorf("check requires a nonempty claim of at most %d bytes", MaxClaim)
@@ -197,6 +300,7 @@ func ResultToolSchema(statuses ...string) map[string]interface{} {
 		"required": []string{"status", "summary"},
 	}
 }
+
 type Observation struct {
 	Text  string
 	Image string // base64 PNG, only when explicitly requested

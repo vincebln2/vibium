@@ -33,7 +33,7 @@ Otherwise, create a private settings file:
 ```bash
 vibium config init
 # Wrote /Users/you/.config/vibium/ai.env (0600) — provider, model and API key for run and check
-# Edit it, then: source /Users/you/.config/vibium/ai.env
+# Edit it, then run vibium. Empty AI variables are loaded from this file.
 ```
 
 That writes a commented file readable only by you. Open
@@ -46,23 +46,22 @@ export VIBIUM_AI_REASONING_EFFORT=none
 export OPENAI_API_KEY='replace-with-your-api-key'
 ```
 
-Use a model your API account can access. This model uses `none` for tool calls;
-other models may use different settings. Keep `export` on each line so the
-settings reach Vibium, and keep your actual key in the file rather than chat
-or project source code.
+Use a model your API account can access. `VIBIUM_AI_REASONING_EFFORT=none` is
+the right setting for this model; other OpenAI models may want a different
+value, and Anthropic and Google models want it left unset. Keep `export` on
+each line so the settings reach Vibium, and keep your actual key in the file
+rather than chat or project source code.
 
-Load the file in the terminal you'll use for this tutorial:
+Then run readiness in any terminal:
 
 ```bash
-source ~/.config/vibium/ai.env
 vibium ready
 ```
 
 Wait for browser installation and AI checks to pass. Readiness checks browser
 files without opening a browser. If one is missing, run the suggested
 `vibium install` command, then retry. Other failures also include a suggested fix.
-Vibium does not load the file automatically, so source it again in each new
-shell. These shared settings work for both Run and Check.
+These shared settings work for both Run and Check.
 
 ## 2. Check a website
 
@@ -116,19 +115,20 @@ Keep `sitecheck.zip` for Part 3.
 
 ## Optional: include video with Firefox
 
-Once the browser from this exercise is closed, use Firefox beta for this
-development build's video example:
+Once the browser from this exercise is closed, run the same check on Firefox
+to get video:
 
 ```bash
-vibium install --engine firefox --channel beta
-vibium check "https://var.parts is up" -o sitecheck-firefox.zip --engine firefox --channel beta
+vibium install --engine firefox
+vibium check "https://var.parts is up" -o sitecheck-firefox.zip --engine firefox
 ```
 
 If you used `--keep-open`, close that browser with `vibium stop` before switching
 engines. An unrelated existing session should be preserved; finish this exercise
 in a separate session if needed.
 
-Firefox 154 or newer includes WebM video. Chrome currently records actions and
+Firefox records WebM video from version 154; the release channel is well past
+that, so no channel flag is needed. Chrome currently records actions and
 screenshots without continuous video. Record Player can play the video from
 your ZIP.
 

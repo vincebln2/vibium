@@ -193,7 +193,22 @@ func (v *Model) completeAnthropic(ctx context.Context, c Config, messages []mess
 	if force != "" {
 		choice = map[string]interface{}{"type": "tool", "name": force, "disable_parallel_tool_use": true}
 	}
-	data, err := v.post(ctx, c.Endpoint()+"/messages", map[string]interface{}{"model": c.Model, "system": system, "messages": history, "tools": tools, "max_tokens": MaxOutputTokens, "tool_choice": choice}, map[string]string{"x-api-key": c.APIKey, "anthropic-version": "2023-06-01"})
+	// Prompt caching: the marker on the system block caches tools and system,
+	// the one on the conversation's final block makes this turn's full history
+	// the next turn's cached prefix. History blocks are rebuilt on every call,
+	// so markers never accumulate across turns.
+	ephemeral := map[string]string{"type": "ephemeral"}
+	var systemBlocks interface{} = system
+	if system != "" {
+		systemBlocks = []interface{}{map[string]interface{}{"type": "text", "text": system, "cache_control": ephemeral}}
+	}
+	if len(history) > 0 {
+		content := history[len(history)-1].Content
+		if len(content) > 0 {
+			content[len(content)-1]["cache_control"] = ephemeral
+		}
+	}
+	data, contentType, err := v.post(ctx, c.Endpoint()+"/messages", map[string]interface{}{"model": c.Model, "system": systemBlocks, "messages": history, "tools": tools, "max_tokens": MaxOutputTokens, "tool_choice": choice}, map[string]string{"x-api-key": c.APIKey, "anthropic-version": "2023-06-01"})
 	if err != nil {
 		return message{}, err
 	}
@@ -204,7 +219,10 @@ func (v *Model) completeAnthropic(ctx context.Context, c Config, messages []mess
 			Input                json.RawMessage
 		} `json:"content"`
 	}
-	if json.Unmarshal(data, &response) != nil || (response.StopReason != "end_turn" && response.StopReason != "tool_use") {
+	if json.Unmarshal(data, &response) != nil {
+		return message{}, invalidProviderResponse(c, contentType, "an Anthropic messages response")
+	}
+	if response.StopReason != "end_turn" && response.StopReason != "tool_use" {
 		return message{}, fmt.Errorf("Anthropic response incomplete, refused, or unsupported tool behavior")
 	}
 	out := message{Role: "assistant"}
@@ -247,7 +265,7 @@ func (v *Model) completeGoogle(ctx context.Context, c Config, messages []message
 	}
 	payload := map[string]interface{}{"systemInstruction": map[string]interface{}{"parts": []interface{}{map[string]string{"text": system}}}, "contents": history, "tools": []interface{}{map[string]interface{}{"functionDeclarations": declarations}}, "toolConfig": map[string]interface{}{"functionCallingConfig": calling}, "generationConfig": map[string]interface{}{"maxOutputTokens": MaxOutputTokens}}
 	model := strings.TrimPrefix(c.Model, "models/")
-	data, err := v.post(ctx, c.Endpoint()+"/models/"+url.PathEscape(model)+":generateContent", payload, map[string]string{"x-goog-api-key": c.APIKey})
+	data, contentType, err := v.post(ctx, c.Endpoint()+"/models/"+url.PathEscape(model)+":generateContent", payload, map[string]string{"x-goog-api-key": c.APIKey})
 	if err != nil {
 		return message{}, err
 	}
@@ -268,7 +286,10 @@ func (v *Model) completeGoogle(ctx context.Context, c Config, messages []message
 			} `json:"content"`
 		} `json:"candidates"`
 	}
-	if json.Unmarshal(data, &response) != nil || len(response.Candidates) != 1 || response.Candidates[0].FinishReason != "STOP" {
+	if json.Unmarshal(data, &response) != nil {
+		return message{}, invalidProviderResponse(c, contentType, "a Gemini generateContent response")
+	}
+	if len(response.Candidates) != 1 || response.Candidates[0].FinishReason != "STOP" {
 		return message{}, fmt.Errorf("Google response incomplete, refused, or unsupported function calling")
 	}
 	out := message{Role: "assistant"}

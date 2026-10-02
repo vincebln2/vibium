@@ -73,12 +73,12 @@ func TestFreshContextAndToolLoop(t *testing.T) {
 			t.Error("model/instructions not applied")
 		}
 		if requests%2 == 1 {
-			if len(body.Messages) != 5 {
+			if len(body.Messages) != 6 {
 				t.Errorf("new verification inherited messages: %d", len(body.Messages))
 			}
 			answer(w, "DO NOT PERSIST", calls("browser_map", 1))
 		} else {
-			if body.Messages[5].Content != nil || body.Messages[6].Role != "tool" {
+			if body.Messages[6].Content != nil || body.Messages[7].Role != "tool" {
 				t.Error("tool conversation malformed")
 			}
 			answer(w, verdict, nil)
@@ -91,11 +91,40 @@ func TestFreshContextAndToolLoop(t *testing.T) {
 		req := testRequest(server.URL)
 		req.Config.ReasoningEffort = "none"
 		result, err := adapter.Check(context.Background(), req, tools)
-		if err != nil || result.Status != "passed" || result.Claim != "name persists" || len(tools.calls) != 4 {
+		if err != nil || result.Status != "passed" || result.Claim != "name persists" || len(tools.calls) != 5 {
 			t.Fatalf("result=%+v err=%v calls=%v", result, err, tools.calls)
 		}
 	}
 }
+// The initial observations include the page's visible text, so the first
+// model turn can act on page content instead of fetching it (#593).
+func TestInitialObservationsIncludeVisibleText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []message `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		found := false
+		for _, m := range body.Messages {
+			if content, ok := m.Content.(string); ok && strings.HasPrefix(content, "browser_get_text observation") {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("visible page text missing from initial observations")
+		}
+		answer(w, nil, verdictCall("v1", verdict))
+	}))
+	defer server.Close()
+	tools := &fakeTools{}
+	if _, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), tools); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools.calls) < 4 || tools.calls[3] != "browser_get_text" {
+		t.Errorf("browser_get_text not executed before the first turn: %v", tools.calls)
+	}
+}
+
 func verdictCall(id, arguments string) []interface{} {
 	return []interface{}{map[string]interface{}{"id": id, "type": "function", "function": map[string]string{"name": "return_verdict", "arguments": arguments}}}
 }
@@ -143,40 +172,44 @@ func TestInvalidVerdictToolArgsReturnToModel(t *testing.T) {
 	}
 }
 
-// On the corrective turn after a plain-text final message, the openai
-// provider forces return_verdict via tool_choice; openai-compatible keeps
+// On the corrective turn after a plain-text final message, native openai and
+// xai providers force return_verdict via tool_choice; openai-compatible keeps
 // auto so the compatibility floor stays at plain function tools.
 func TestRepairTurnForcesVerdictTool(t *testing.T) {
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		var body struct {
-			ToolChoice *struct {
-				Type     string `json:"type"`
-				Function struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			} `json:"tool_choice"`
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		if requests == 1 {
-			if body.ToolChoice != nil {
-				t.Error("tool choice forced before any failure")
+	for _, provider := range []string{"openai", "xai"} {
+		t.Run(provider, func(t *testing.T) {
+			requests := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				var body struct {
+					ToolChoice *struct {
+						Type     string `json:"type"`
+						Function struct {
+							Name string `json:"name"`
+						} `json:"function"`
+					} `json:"tool_choice"`
+				}
+				json.NewDecoder(r.Body).Decode(&body)
+				if requests == 1 {
+					if body.ToolChoice != nil {
+						t.Error("tool choice forced before any failure")
+					}
+					answer(w, "The evidence is clear: "+verdict, nil)
+					return
+				}
+				if body.ToolChoice == nil || body.ToolChoice.Type != "function" || body.ToolChoice.Function.Name != "return_verdict" {
+					t.Errorf("corrective turn did not force return_verdict: %+v", body.ToolChoice)
+				}
+				answer(w, nil, verdictCall("v1", verdict))
+			}))
+			defer server.Close()
+			req := testRequest(server.URL)
+			req.Config.Provider = provider
+			result, err := (&OpenAI{}).Check(context.Background(), req, &fakeTools{})
+			if err != nil || result.Status != "passed" || requests != 2 {
+				t.Fatalf("result=%+v err=%v requests=%d", result, err, requests)
 			}
-			answer(w, "The evidence is clear: "+verdict, nil)
-			return
-		}
-		if body.ToolChoice == nil || body.ToolChoice.Type != "function" || body.ToolChoice.Function.Name != "return_verdict" {
-			t.Errorf("corrective turn did not force return_verdict: %+v", body.ToolChoice)
-		}
-		answer(w, nil, verdictCall("v1", verdict))
-	}))
-	defer server.Close()
-	req := testRequest(server.URL)
-	req.Config.Provider = "openai"
-	result, err := (&OpenAI{}).Check(context.Background(), req, &fakeTools{})
-	if err != nil || result.Status != "passed" || requests != 2 {
-		t.Fatalf("result=%+v err=%v requests=%d", result, err, requests)
+		})
 	}
 }
 
@@ -259,7 +292,7 @@ func TestProviderErrorsAndVerdicts(t *testing.T) {
 			if err != nil && (strings.Contains(err.Error(), "test-secret") || strings.Contains(err.Error(), "DO NOT PERSIST")) {
 				t.Fatal("leaked provider body")
 			}
-			if tc.tool != "" && len(tools.calls) != 3 {
+			if tc.tool != "" && len(tools.calls) != 4 {
 				t.Fatal("executed denied tool")
 			}
 		})
@@ -285,8 +318,8 @@ func TestActionErrorReturnedToModel(t *testing.T) {
 		answer(w, verdict, nil)
 	}))
 	defer server.Close()
-	// The 3 initial observations succeed; the model's own call fails.
-	tools := &fakeTools{err: &ActionError{Err: fmt.Errorf("failed to click: element not found")}, errAfter: 3}
+	// The 4 initial observations succeed; the model's own call fails.
+	tools := &fakeTools{err: &ActionError{Err: fmt.Errorf("failed to click: element not found")}, errAfter: 4}
 	result, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), tools)
 	if err != nil || result.Status != "passed" || requests != 2 {
 		t.Fatalf("result=%+v err=%v requests=%d", result, err, requests)
@@ -297,7 +330,7 @@ func TestNonActionErrorStaysFatal(t *testing.T) {
 		answer(w, nil, calls("browser_map", 1))
 	}))
 	defer server.Close()
-	tools := &fakeTools{err: fmt.Errorf("browser connection lost"), errAfter: 3}
+	tools := &fakeTools{err: fmt.Errorf("browser connection lost"), errAfter: 4}
 	_, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), tools)
 	if err == nil || !strings.Contains(err.Error(), "verifier browser action") {
 		t.Fatalf("expected fatal browser action error, got: %v", err)
@@ -308,7 +341,7 @@ func TestActionBudget(t *testing.T) {
 	defer server.Close()
 	tools := &fakeTools{}
 	result, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), tools)
-	if err != nil || result.Status != "inconclusive" || len(tools.calls) != MaxActions+3 {
+	if err != nil || result.Status != "inconclusive" || len(tools.calls) != MaxActions+4 {
 		t.Fatalf("%+v %v %d", result, err, len(tools.calls))
 	}
 }
@@ -343,6 +376,59 @@ func TestScreenshotMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestScreenshotPruning(t *testing.T) {
+	n := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n <= 4 {
+			answer(w, nil, calls("browser_map", 1))
+			return
+		}
+		var body map[string]interface{}
+		json.NewDecoder(r.Body).Decode(&body)
+		data, _ := json.Marshal(body)
+		if got := strings.Count(string(data), "data:image/png;base64,cG5n"); got != 2 {
+			t.Errorf("final request carries %d screenshots, want 2", got)
+		}
+		if got := strings.Count(string(data), "superseded"); got != 2 {
+			t.Errorf("final request carries %d placeholders, want 2", got)
+		}
+		answer(w, verdict, nil)
+	}))
+	defer server.Close()
+	if _, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), &fakeTools{image: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An empty final message gets the corrective turn without echoing the empty
+// content back, which Anthropic would reject as an empty text block (#595).
+func TestEmptyFinalMessageNotEchoedInRepair(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			answer(w, "", nil)
+			return
+		}
+		var body struct {
+			Messages []message `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		for _, m := range body.Messages {
+			if m.Role == "assistant" && len(m.ToolCalls) == 0 && m.Content == "" {
+				t.Error("empty assistant message echoed into the repair turn")
+			}
+		}
+		answer(w, nil, verdictCall("v1", verdict))
+	}))
+	defer server.Close()
+	result, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), &fakeTools{})
+	if err != nil || result.Status != "passed" || requests != 2 {
+		t.Fatalf("result=%+v err=%v requests=%d", result, err, requests)
+	}
+}
+
 func TestConfiguration(t *testing.T) {
 	t.Setenv("VIBIUM_AI_PROVIDER", "openai")
 	t.Setenv("VIBIUM_AI_MODEL", "")
@@ -363,5 +449,33 @@ func TestConfiguration(t *testing.T) {
 		if c.Validate() == nil {
 			t.Errorf("accepted %s", base)
 		}
+	}
+}
+
+func TestUnparseableProviderResponseNamesContentAndSetting(t *testing.T) {
+	for _, tc := range []struct{ name, contentType, body, want string }{
+		{name: "html page", contentType: "text/html; charset=utf-8", body: "<!doctype html><title>welcome</title>", want: "AI provider returned text/html, not JSON; check --ai-base-url / VIBIUM_AI_BASE_URL"},
+		{name: "unrecognized type", contentType: "application/x-mystery", body: "junk-body", want: "AI provider returned a non-JSON content type"},
+		{name: "json wrong shape", contentType: "application/json", body: `{"ok":true}`, want: "AI provider returned JSON that is not a chat-completions message"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				fmt.Fprint(w, tc.body)
+			}))
+			defer server.Close()
+			_, err := (&OpenAI{}).Check(context.Background(), testRequest(server.URL), &fakeTools{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q in error, got: %v", tc.want, err)
+			}
+			for _, leak := range []string{"welcome", "junk-body", `"ok"`} {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatal("leaked provider body")
+				}
+			}
+		})
+	}
+	if err := invalidProviderResponse(Config{Provider: "openai"}, "text/html", "a chat-completions message"); strings.Contains(err.Error(), "--ai-base-url") {
+		t.Fatal("hint should name the override only when one is in effect")
 	}
 }

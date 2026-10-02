@@ -10,18 +10,20 @@ conversation; the operation selects its instructions and tool permissions.
 | Optional API base URL | `VIBIUM_AI_BASE_URL` |
 | Optional OpenAI reasoning effort | `VIBIUM_AI_REASONING_EFFORT` |
 
-Both operations support `openai`, `anthropic`, `google`, `openai-compatible`,
+Both operations support `openai`, `xai`, `anthropic`, `google`, `openai-compatible`,
 and `local`. Provider credentials use their native environment variables:
 
 | Provider | Credential | Default API base URL |
 |----------|------------|----------------------|
 | `openai` | `OPENAI_API_KEY`, required | `https://api.openai.com/v1` |
+| `xai` | `XAI_API_KEY`, or a signed-in Grok CLI session | `https://api.x.ai/v1` |
 | `anthropic` | `ANTHROPIC_API_KEY`, required | `https://api.anthropic.com/v1` |
-| `google` | `GOOGLE_API_KEY`, required | `https://generativelanguage.googleapis.com/v1beta` |
+| `google` | `GOOGLE_API_KEY`, or `GEMINI_API_KEY` | `https://generativelanguage.googleapis.com/v1beta` |
 | `openai-compatible` | `OPENAI_API_KEY`, optional | Explicit base URL required |
 | `local` | `OPENAI_API_KEY`, optional | `http://127.0.0.1:8080/v1` |
 
-`GOOGLE_API_KEY` is the canonical Google variable; `GEMINI_API_KEY` is not read.
+`GOOGLE_API_KEY` is the canonical Google variable; `GEMINI_API_KEY` (the name
+Google's own SDKs use) is read when `GOOGLE_API_KEY` is unset.
 If an optional key is configured, it is sent to the configured endpoint.
 Base URLs must be HTTP(S), without embedded credentials, query, or fragment.
 Native base URL overrides use the provider's API version prefix, not the full
@@ -35,7 +37,7 @@ Run, live Check, saved-input Check, and AI readiness accept the same overrides:
 |----------|-------------------------------|----------------|
 | `--provider` | `provider` | `provider` |
 | `--model` | `model` | `model` |
-| `--base-url` | `baseURL` | `base_url` |
+| `--ai-base-url` | `aiBaseURL` | `ai_base_url` |
 | `--reasoning-effort` | `reasoningEffort` | `reasoning_effort` |
 
 Explicit options override the shared AI environment for this invocation only.
@@ -44,7 +46,7 @@ selected provider's environment variable; there is no API-key option.
 
 When the provider changes, supply the model explicitly. Vibium clears the old
 provider's model, endpoint, and reasoning effort before applying your options.
-The new provider's default endpoint is used, or supply `baseURL` for a custom
+The new provider's default endpoint is used, or supply `aiBaseURL` for a custom
 endpoint. `openai-compatible` always requires an explicit endpoint after a
 provider change. If the provider stays the same, omitted options retain the
 shared AI defaults.
@@ -67,7 +69,7 @@ vibium check "the saved timezone is America/Chicago after refresh" \
 
 vibium check "the order confirmation was shown" -i record.zip \
   --provider local --model your-loaded-model \
-  --base-url http://127.0.0.1:8080/v1 --reasoning-effort ""
+  --ai-base-url http://127.0.0.1:8080/v1 --reasoning-effort ""
 # Checks saved evidence using the specified local server and its default effort.
 ```
 
@@ -134,6 +136,23 @@ export VIBIUM_AI_REASONING_EFFORT=none
 vibium ready ai
 ```
 
+xAI (Grok) uses the same Chat Completions protocol with `XAI_API_KEY`:
+
+```bash
+export VIBIUM_AI_PROVIDER=xai
+export VIBIUM_AI_MODEL=grok-4
+unset VIBIUM_AI_BASE_URL
+vibium ready ai
+```
+
+`vibium ready ai xai --model grok-4` selects the same provider for one call.
+
+When `XAI_API_KEY` is unset, Vibium reuses a signed-in Grok CLI session:
+it reads the access token from `~/.grok/auth.json` (or `$GROK_HOME/auth.json`)
+and uses it while it is valid. Vibium never refreshes, stores, or rewrites
+that login. When the session expires, run `grok login` again or export
+`XAI_API_KEY`. `vibium ready ai` reports this credential as `Grok login`.
+
 Use different providers for individual calls without changing the shared defaults:
 
 ```bash
@@ -176,8 +195,9 @@ also tests the selected browser; see [readiness diagnostics](ready.md). Exit 0 a
 the provider tool round-trip passed. It does not test screenshot capability or
 application behavior. Unsupported tool protocols produce errors and setup guidance.
 
-Vibium does not load environment files automatically. Use `export NAME=value`
-assignments in a private file, then source it in the same shell invocation.
+Vibium loads `~/.config/vibium/ai.env` for empty AI variables on each command.
+Nonempty process environment still wins. Command substitution is not expanded.
+Set `VIBIUM_LOAD_AI_ENV=0` to skip.
 
 `vibium config init` writes that file for you at `~/.config/vibium/ai.env`,
 readable only by you, with every setting present and commented:
@@ -185,7 +205,7 @@ readable only by you, with every setting present and commented:
 ```
 $ vibium config init
 Wrote ~/.config/vibium/ai.env (0600) — provider, model and API key for run and check
-Edit it, then: source ~/.config/vibium/ai.env
+Edit it, then run vibium. Empty AI variables are loaded from this file.
 ```
 
 It refuses to overwrite an existing file unless you pass `--force`, which keeps
@@ -197,7 +217,7 @@ overrides take effect immediately and do not require a runtime restart.
 
 ## Protocol and reasoning behavior
 
-OpenAI retains the existing Chat Completions function-tool protocol.
+OpenAI and xAI use the Chat Completions function-tool protocol.
 Compatible endpoints must accept function tools, `parallel_tool_calls: false`,
 and `max_completion_tokens`. Image input is needed when an operation requests
 a screenshot. See [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling).
@@ -208,8 +228,8 @@ translate requested PNG/JPEG screenshots into the provider's image format.
 See [Anthropic tool calls](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls)
 and [Gemini API schemas](https://ai.google.dev/api/generate-content).
 
-Reasoning-effort settings are supported only for OpenAI and compatible
-endpoints in this slice. Leave them unset for Anthropic and Google; extended
+Reasoning-effort settings are supported for OpenAI, xAI, and compatible
+endpoints. Leave them unset for Anthropic and Google; extended
 thinking is not requested from Anthropic. Free-form assistant text accompanying
 tool calls and readable reasoning are discarded. Gemini's opaque function-call
 signatures are retained only in memory during that invocation and returned to
